@@ -4,5 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-reqwest = {version = "0.12", features = ["rustls-tls"]}
-tokio = {version = "1.44", features = ["full"]}
+clap = { version = "4.5.37", features = ["derive"] }
+eframe = { version = "0.31.1" }
+reqwest = { version = "0.12", features = ["rustls-tls"] }
+tokio = { version = "1.44", features = ["full"] }
+tracing = { version = "0.1.41" }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
