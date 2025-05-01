@@ -6,19 +6,17 @@ use tracing::{debug, error, info, trace, warn};
 const IDLE_POLLING_INTERVAL: Duration = Duration::from_millis(100);
 const FAST_POLLING_INTERVAL: Duration = Duration::from_millis(16);
 const EXITING_DEADLINE: Duration = Duration::from_secs(5);
-const FAREWELL_MESSAGE_DURATION: Duration = Duration::from_secs(2);
 
 pub enum AppState {
     Running,
     Exiting(Instant),
-    ReadyToExit(Instant),
     Fatal(String),
+    Quit,
 }
 
 pub struct App {
     app_state: AppState,
     message_bus: Vec<AppMessage>,
-    shutdown_signal: Option<crossbeam_channel::Receiver<()>>,
     polling_interval: Duration,
 }
 
@@ -27,31 +25,15 @@ impl App {
         App {
             app_state: AppState::Running,
             message_bus: Vec::new(),
-            shutdown_signal: None,
             polling_interval: IDLE_POLLING_INTERVAL,
         }
     }
     pub fn shutdown(&mut self) -> Result<()> {
         self.app_state = AppState::Exiting(Instant::now() + EXITING_DEADLINE);
 
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        self.shutdown_signal = Some(rx);
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(2));
-            let _ = tx.send(());
-        });
-
         self.polling_interval = FAST_POLLING_INTERVAL;
 
         Ok(())
-    }
-    pub fn ready_to_exit(&mut self) -> bool {
-        if self.shutdown_signal.as_ref().unwrap().try_recv().is_ok() {
-            self.app_state = AppState::ReadyToExit(Instant::now() + FAREWELL_MESSAGE_DURATION);
-            true
-        } else {
-            false
-        }
     }
     pub fn polling_interval(&self) -> Duration {
         self.polling_interval
@@ -60,6 +42,7 @@ impl App {
 
 pub enum AppMessage {
     Quit,
+    Exiting,
     PlaceHolder,
 }
 
@@ -70,11 +53,6 @@ impl App {
 
         match self.app_state {
             AppState::Exiting(deadline) => {
-                if now >= deadline {
-                    messages.push(AppMessage::Quit);
-                }
-            }
-            AppState::ReadyToExit(deadline) => {
                 if now >= deadline {
                     messages.push(AppMessage::Quit);
                 }
@@ -98,9 +76,15 @@ impl App {
 
     fn update_one(&mut self, message: AppMessage) -> Result<()> {
         match message {
-            AppMessage::PlaceHolder => Ok(()),
-            AppMessage::Quit => Ok(()),
+            AppMessage::PlaceHolder => {},
+            AppMessage::Exiting => {
+                self.shutdown().unwrap();
+            },
+            AppMessage::Quit => {
+                self.app_state = AppState::Quit;
+            },
         }
+        Ok(())
     }
 }
 
@@ -113,9 +97,6 @@ impl App {
             }
             AppState::Exiting(deadline) => {
                 let now = Instant::now();
-                if !self.ready_to_exit() && now >= deadline {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
                 egui::Window::new("Application is exiting")
                     .collapsible(false)
                     .resizable(false)
@@ -125,19 +106,6 @@ impl App {
                             "Cleaning up... The application will close in {} seconds.",
                             (deadline - now).as_secs()
                         ));
-                    });
-            }
-            AppState::ReadyToExit(deadline) => {
-                let now = Instant::now();
-                if now >= deadline {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-                egui::Window::new("Application is exiting")
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .show(ctx, |ui| {
-                        ui.label("Cleanup finished. The application will shut down now.");
                     });
             }
             AppState::Fatal(ref f) => {
@@ -150,6 +118,9 @@ impl App {
                         ui.label("Please restart the application.");
                     });
             }
+            AppState::Quit => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         }
     }
 }
@@ -160,7 +131,6 @@ impl App {
         App {
             app_state: AppState::Fatal("fatal error".into()),
             message_bus: Vec::new(),
-            shutdown_signal: None,
             polling_interval: IDLE_POLLING_INTERVAL,
         }
     }
@@ -172,14 +142,20 @@ impl eframe::App for App {
         let mut external_messages = Vec::<AppMessage>::new();
 
         // Get input
-        if ctx.input(|i| i.viewport().close_requested())
-            && matches!(self.app_state, AppState::Running)
-        {
-            external_messages.push(AppMessage::Quit);
-            if let Err(e) = self.shutdown() {
-                error!("Application shutdown failed: {}", e);
+        if ctx.input(|i| i.viewport().close_requested()) {
+            match self.app_state {
+                AppState::Running => {
+                    debug!("Closing app");
+                    external_messages.push(AppMessage::Exiting);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                }
+                AppState::Quit => {
+                    debug!("Graceful shutdown");
+                }
+                _ => {
+                    warn!("Force closed");
+                }
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
 
         // Pass information to app::receive_events (this populates the message bus)
