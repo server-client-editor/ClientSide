@@ -1,5 +1,72 @@
+//! This module intentionally separates application lifecycle logic from page view rendering.
+//!
+//! Ideally, the app's exit should be controlled by `update()`, treating the shell
+//! (the host runtime) as just another component. However, the current design still
+//! depends on the shell to communicate with the OS.
+//!
+//! While it’s possible to unify shutdown into a `Page` (e.g., a `PoisonPage`),
+//! this increases coupling between the UI structure and shell logic, and
+//! sacrifices the clarity of centralized lifecycle control.
+//!
+//! ## Centralized Shutdown Version
+//! ```ignore
+//! impl eframe::App for App {
+//!     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+//!         if ctx.input(|i| i.viewport().close_requested()) {
+//!             match self.lifecycle {
+//!                 Lifecycle::Running => {
+//!                     debug!("Closing app");
+//!                     ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+//!                 }
+//!                 Lifecycle::PendingQuit => warn!("Force closed"),
+//!                 Lifecycle::QuittingShell => debug!("Graceful shutdown"),
+//!             }
+//!         }
+//!
+//!         // Other logic...
+//!
+//!         if matches!(self.lifecycle, Lifecycle::QuittingShell) {
+//!             ctx.send_viewport_cmd(ViewportCommand::Close);
+//!         } else {
+//!             self.view(ctx);
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! ## `PoisonPage` Shutdown Version
+//! ```ignore
+//! pub struct PoisonPage;
+//!
+//! impl View for PoisonPage {
+//!     fn view(&mut self, ctx: &egui::Context) {
+//!         ctx.send_viewport_cmd(ViewportCommand::Close);
+//!     }
+//! }
+//!
+//! impl eframe::App for App {
+//!     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+//!         if ctx.input(|i| i.viewport().close_requested()) {
+//!             match self.current_page {
+//!                 Page::Quit(_) => debug!("Graceful shutdown"),
+//!                 Page::Fatal(_) | Page::Shutdown(_) => warn!("Force closed"),
+//!                 _ => {
+//!                     debug!("Closing app");
+//!                     external_messages.push(AppMessage::Exiting);
+//!                     ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+//!                 }
+//!             }
+//!         }
+//!
+//!         // Other logic...
+//!
+//!         self.view(ctx);
+//!     }
+//! }
+//! ```
+
+use crate::page::{Update, View};
 use crate::*;
-use crate::page::View;
 use anyhow::{anyhow, Result};
 use eframe::egui;
 use std::time::{Duration, Instant};
@@ -9,79 +76,6 @@ const IDLE_POLLING_INTERVAL: Duration = Duration::from_millis(100);
 const FAST_POLLING_INTERVAL: Duration = Duration::from_millis(16);
 const EXITING_DEADLINE: Duration = Duration::from_secs(5);
 
-/// Separating application lifecycle from page view is intentional.
-/// Ideally, the app's exit should be controlled by `update()`,
-/// and the shell (the outer host) should be treated as a component
-/// within our app. However, we still rely on the shell to
-/// communicate with the operating system.
-///
-/// Although it's possible to unify quitting into a `Page` via
-/// a `PoisonPage`, doing so sacrifices the clarity of centralized
-/// shutdown logic and increases the coupling between shell logic
-/// and UI structure.
-///
-/// This comment documents both approaches:
-///
-/// Centralized shutdown version:
-/// ```ignore
-/// impl eframe::App for App {
-///     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-///         // Handle close requests
-///         if ctx.input(|i| i.viewport().close_requested()) {
-///             match self.lifecycle {
-///                 Lifecycle::Running => {
-///                     debug!("Closing app");
-///                     ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-///                 }
-///                 Lifecycle::PendingQuit => warn!("Force closed"),
-///                 Lifecycle::QuittingShell => debug!("Graceful shutdown"),
-///             }
-///         }
-///
-///         /* Other logic */
-///
-///         // Render UI
-///         if matches!(self.lifecycle, Lifecycle::QuittingShell) {
-///             ctx.send_viewport_cmd(ViewportCommand::Close);
-///         } else {
-///             self.view(ctx);
-///         }
-///     }
-/// }
-/// ```
-///
-/// `PoisonPage` shutdown version:
-/// ```ignore
-/// pub struct PoisonPage;
-///
-/// impl View for PoisonPage {
-///     fn view(&mut self, ctx: &egui::Context) {
-///         ctx.send_viewport_cmd(ViewportCommand::Close);
-///     }
-/// }
-///
-/// impl eframe::App for App {
-///     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-///         // Handle close requests
-///         if ctx.input(|i| i.viewport().close_requested()) {
-///             match self.current_page {
-///                 Page::Quit(_) => debug!("Graceful shutdown"),
-///                 Page::Fatal(_) | Page::Shutdown(_) => warn!("Force closed"),
-///                 _ => {
-///                     debug!("Closing app");
-///                     external_messages.push(AppMessage::Exiting);
-///                     ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-///                 }
-///             }
-///         }
-///
-///         /* Other logic */
-///
-///         // Render UI
-///         self.view(ctx);
-///     }
-/// }
-/// ```
 pub enum Lifecycle {
     PendingQuit,
     QuitingShell,
@@ -97,16 +91,22 @@ pub enum Page {
 pub struct App {
     lifecycle: Lifecycle,
     current_page: Page,
-    message_bus: Vec<AppMessage>,
+    message_tx: crossbeam_channel::Sender<AppMessage>,
+    message_rx: crossbeam_channel::Receiver<AppMessage>,
     polling_interval: Duration,
 }
 
 impl App {
     pub fn new() -> App {
+        let (message_tx, message_rx) = crossbeam_channel::unbounded();
         App {
             lifecycle: Lifecycle::Running,
-            current_page: Page::Login(page::LoginPage::new()),
-            message_bus: Vec::new(),
+            current_page: Page::Login(page::LoginPage::new(
+                message_tx.clone(),
+                Box::new(|m| AppMessage::Login(m)),
+            )),
+            message_tx,
+            message_rx,
             polling_interval: IDLE_POLLING_INTERVAL,
         }
     }
@@ -128,6 +128,8 @@ pub enum AppMessage {
     Quit,
     Exiting,
     PlaceHolder,
+
+    Login(page::LoginMessage),
 }
 
 impl App {
@@ -148,24 +150,32 @@ impl App {
     }
 
     pub fn receive_messages(&mut self, messages: &mut Vec<AppMessage>) {
-        self.message_bus.append(messages);
+        for message in messages.drain(..) {
+            self.message_tx.send(message).unwrap();
+        }
     }
 
     pub fn update(&mut self) {
-        let mut message_bus = std::mem::take(&mut self.message_bus);
-        for message in message_bus.drain(..) {
-            self.update_one(message).unwrap(); // Is dropping messages a good idea?
+        let rx = self.message_rx.clone();
+        for message in rx.try_iter() {
+            self.update_one(message).unwrap();
         }
     }
 
     fn update_one(&mut self, message: AppMessage) -> Result<()> {
         match message {
-            AppMessage::PlaceHolder => {},
+            AppMessage::PlaceHolder => {}
             AppMessage::Exiting => {
                 self.shutdown().unwrap();
-            },
+            }
             AppMessage::Quit => {
                 self.lifecycle = Lifecycle::QuitingShell;
+            }
+            AppMessage::Login(message) => match &mut self.current_page {
+                Page::Login(inner) => {
+                    inner.update_one(message);
+                }
+                _ => {}
             },
         }
         Ok(())
@@ -186,10 +196,12 @@ impl App {
 // Test block
 impl App {
     pub fn new_fatal() -> App {
+        let (message_tx, message_rx) = crossbeam_channel::unbounded();
         App {
             lifecycle: Lifecycle::Running,
             current_page: Page::Fatal(page::FatalPage::new("fatal error".into())),
-            message_bus: Vec::new(),
+            message_tx,
+            message_rx,
             polling_interval: IDLE_POLLING_INTERVAL,
         }
     }
