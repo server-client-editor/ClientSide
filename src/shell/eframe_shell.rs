@@ -1,3 +1,5 @@
+use crate::*;
+use crate::page::View;
 use anyhow::{anyhow, Result};
 use eframe::egui;
 use std::time::{Duration, Instant};
@@ -7,15 +9,94 @@ const IDLE_POLLING_INTERVAL: Duration = Duration::from_millis(100);
 const FAST_POLLING_INTERVAL: Duration = Duration::from_millis(16);
 const EXITING_DEADLINE: Duration = Duration::from_secs(5);
 
-pub enum AppState {
+/// Separating application lifecycle from page view is intentional.
+/// Ideally, the app's exit should be controlled by `update()`,
+/// and the shell (the outer host) should be treated as a component
+/// within our app. However, we still rely on the shell to
+/// communicate with the operating system.
+///
+/// Although it's possible to unify quitting into a `Page` via
+/// a `PoisonPage`, doing so sacrifices the clarity of centralized
+/// shutdown logic and increases the coupling between shell logic
+/// and UI structure.
+///
+/// This comment documents both approaches:
+///
+/// Centralized shutdown version:
+/// ```ignore
+/// impl eframe::App for App {
+///     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+///         // Handle close requests
+///         if ctx.input(|i| i.viewport().close_requested()) {
+///             match self.lifecycle {
+///                 Lifecycle::Running => {
+///                     debug!("Closing app");
+///                     ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+///                 }
+///                 Lifecycle::PendingQuit => warn!("Force closed"),
+///                 Lifecycle::QuittingShell => debug!("Graceful shutdown"),
+///             }
+///         }
+///
+///         /* Other logic */
+///
+///         // Render UI
+///         if matches!(self.lifecycle, Lifecycle::QuittingShell) {
+///             ctx.send_viewport_cmd(ViewportCommand::Close);
+///         } else {
+///             self.view(ctx);
+///         }
+///     }
+/// }
+/// ```
+///
+/// `PoisonPage` shutdown version:
+/// ```ignore
+/// pub struct PoisonPage;
+///
+/// impl View for PoisonPage {
+///     fn view(&mut self, ctx: &egui::Context) {
+///         ctx.send_viewport_cmd(ViewportCommand::Close);
+///     }
+/// }
+///
+/// impl eframe::App for App {
+///     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+///         // Handle close requests
+///         if ctx.input(|i| i.viewport().close_requested()) {
+///             match self.current_page {
+///                 Page::Quit(_) => debug!("Graceful shutdown"),
+///                 Page::Fatal(_) | Page::Shutdown(_) => warn!("Force closed"),
+///                 _ => {
+///                     debug!("Closing app");
+///                     external_messages.push(AppMessage::Exiting);
+///                     ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+///                 }
+///             }
+///         }
+///
+///         /* Other logic */
+///
+///         // Render UI
+///         self.view(ctx);
+///     }
+/// }
+/// ```
+pub enum Lifecycle {
+    PendingQuit,
+    QuitingShell,
     Running,
-    Exiting(Instant),
-    Fatal(String),
-    Quit,
+}
+
+pub enum Page {
+    Fatal(page::FatalPage),
+    Login(page::LoginPage),
+    Shutdown(page::ShutdownPage),
 }
 
 pub struct App {
-    app_state: AppState,
+    lifecycle: Lifecycle,
+    current_page: Page,
     message_bus: Vec<AppMessage>,
     polling_interval: Duration,
 }
@@ -23,13 +104,16 @@ pub struct App {
 impl App {
     pub fn new() -> App {
         App {
-            app_state: AppState::Running,
+            lifecycle: Lifecycle::Running,
+            current_page: Page::Login(page::LoginPage::new()),
             message_bus: Vec::new(),
             polling_interval: IDLE_POLLING_INTERVAL,
         }
     }
     pub fn shutdown(&mut self) -> Result<()> {
-        self.app_state = AppState::Exiting(Instant::now() + EXITING_DEADLINE);
+        let deadline = Instant::now() + EXITING_DEADLINE;
+        self.lifecycle = Lifecycle::PendingQuit;
+        self.current_page = Page::Shutdown(page::ShutdownPage::new(deadline));
 
         self.polling_interval = FAST_POLLING_INTERVAL;
 
@@ -51,9 +135,9 @@ impl App {
         let mut messages = Vec::new();
         let now = Instant::now();
 
-        match self.app_state {
-            AppState::Exiting(deadline) => {
-                if now >= deadline {
+        match &self.current_page {
+            Page::Shutdown(inner) => {
+                if now >= inner.get_deadline() {
                     messages.push(AppMessage::Quit);
                 }
             }
@@ -81,7 +165,7 @@ impl App {
                 self.shutdown().unwrap();
             },
             AppMessage::Quit => {
-                self.app_state = AppState::Quit;
+                self.lifecycle = Lifecycle::QuitingShell;
             },
         }
         Ok(())
@@ -91,36 +175,10 @@ impl App {
 // View block
 impl App {
     pub fn view(&mut self, ctx: &egui::Context) {
-        match self.app_state {
-            AppState::Running => {
-                // Delegate to page view
-            }
-            AppState::Exiting(deadline) => {
-                let now = Instant::now();
-                egui::Window::new("Application is exiting")
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .show(ctx, |ui| {
-                        ui.label(format!(
-                            "Cleaning up... The application will close in {} seconds.",
-                            (deadline - now).as_secs()
-                        ));
-                    });
-            }
-            AppState::Fatal(ref f) => {
-                egui::Window::new("Fatal error occurred")
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .show(ctx, |ui| {
-                        ui.label(format!("Cause: {}", f));
-                        ui.label("Please restart the application.");
-                    });
-            }
-            AppState::Quit => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+        match &mut self.current_page {
+            Page::Fatal(inner) => inner.view(ctx),
+            Page::Login(inner) => inner.view(ctx),
+            Page::Shutdown(inner) => inner.view(ctx),
         }
     }
 }
@@ -129,7 +187,8 @@ impl App {
 impl App {
     pub fn new_fatal() -> App {
         App {
-            app_state: AppState::Fatal("fatal error".into()),
+            lifecycle: Lifecycle::Running,
+            current_page: Page::Fatal(page::FatalPage::new("fatal error".into())),
             message_bus: Vec::new(),
             polling_interval: IDLE_POLLING_INTERVAL,
         }
@@ -143,18 +202,14 @@ impl eframe::App for App {
 
         // Get input
         if ctx.input(|i| i.viewport().close_requested()) {
-            match self.app_state {
-                AppState::Running => {
+            match self.lifecycle {
+                Lifecycle::Running => {
                     debug!("Closing app");
                     external_messages.push(AppMessage::Exiting);
                     ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 }
-                AppState::Quit => {
-                    debug!("Graceful shutdown");
-                }
-                _ => {
-                    warn!("Force closed");
-                }
+                Lifecycle::PendingQuit => warn!("Force closed"),
+                Lifecycle::QuitingShell => debug!("Graceful shutdown"),
             }
         }
 
@@ -169,7 +224,11 @@ impl eframe::App for App {
         self.update();
 
         // Render UI with app::view
-        self.view(ctx);
+        if matches!(self.lifecycle, Lifecycle::QuitingShell) {
+            ctx.send_viewport_cmd(egui::viewport::ViewportCommand::Close);
+        } else {
+            self.view(ctx);
+        }
 
         let elapsed = start_time.elapsed();
         if elapsed >= self.polling_interval() {
