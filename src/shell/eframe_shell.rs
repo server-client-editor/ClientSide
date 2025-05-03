@@ -67,7 +67,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use crate::page::{Network, NetworkImpl, Update, View};
+use crate::page::{Network, FakeNetwork, Update, View};
 use crate::*;
 use anyhow::{anyhow, Result};
 use eframe::egui;
@@ -102,12 +102,14 @@ pub struct App {
 impl App {
     pub fn new() -> App {
         let (message_tx, message_rx) = crossbeam_channel::unbounded();
+        let network: Rc<RefCell<dyn Network>> = Rc::new(RefCell::new(FakeNetwork::new(message_tx.clone())));
         App {
             lifecycle: Lifecycle::Running,
-            network: Rc::new(RefCell::new(NetworkImpl {})),
+            network: network.clone(),
             current_page: Page::Login(page::LoginPage::new(
                 message_tx.clone(),
                 Box::new(|m| AppMessage::Login(m)),
+                Rc::downgrade(&network),
             )),
             message_tx,
             message_rx,
@@ -203,7 +205,7 @@ impl App {
         let (message_tx, message_rx) = crossbeam_channel::unbounded();
         App {
             lifecycle: Lifecycle::Running,
-            network: Rc::new(RefCell::new(NetworkImpl {})),
+            network: Rc::new(RefCell::new(FakeNetwork::new(message_tx.clone()))),
             current_page: Page::Fatal(page::FatalPage::new("fatal error".into())),
             message_tx,
             message_rx,

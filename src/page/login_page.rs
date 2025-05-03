@@ -38,14 +38,14 @@
 //! }
 //! ```
 
-use crate::page::{Network, NetworkImpl, Update, View};
+use crate::page::{Network, FakeNetwork, Update, View};
 use crate::shell::AppMessage;
 use base64::Engine;
 use crossbeam_channel::Sender;
 use eframe::egui;
 use eframe::egui::{TextBuffer, TextureHandle, TextureOptions};
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::Weak;
 use tracing::warn;
 
 const IMG_STR: &str = "iVBORw0KGgoAAAANSUhEUgAAAGQAAAAyCAMAAACd646MAAAAP1BMVEUAAAAAOnJjndUIQnpRi8OBu/N8tu4qZJwMRn6Lxf0KRHxSjMRalMwoYppmoNhrpd01b6cgWpI8dq4tZ58WUIhMzA4eAAAAAXRSTlMAQObYZgAAAapJREFUeJzsmM1yhCAMgJN1RmU86Pj+D9vpAiHEwAaxTA+bQ9WK+fKLZuEfysuyaO1kvAyUde2lWBZxBvbxTII4hDKA8YfiqncRnwiic2UKBomXbZp53TmAs8QAKgdPmxo4ooPOU6VEDwIEAKZpskNkB+mepDBhPJ8IDI/kSoXEI0tWZ2VoEIqdT1fC3QWR8QpDGHLfFyquC0QylMfsECRCyoU/R10hxa0hgpiUstAjQsp6vh4yRkuuqIgAgTWmVIOpQLg/NaX6Jd8DGAxSJMOdgq4SJSslBLkTgPCQ940/Fl+diELxWw5Rryz+6ZD5+OEjwK9w3KnjODQIUBEiwJwZ+v5X7SPg98H4GggWlzxJV/M8i2iw3C8FjAPuff642FL8X8lgUVkWlZLMELVISZAk0BhQ84SZq9JZ0V4oBqZOCvVJHY+8waFCsFLCyitW06D3+QMvA4u2MmZvJldMLmxm+/6ZcghFrWZZPIk7QUBUGFs7PlGM67ath2KVEYyvfOWG1Ie1hxiVYY2ke86wMIbM72Mow38l4N8ULWNoE4NB2obdJspPAAAA//9aeATJZ1KZSAAAAABJRU5ErkJggg==";
@@ -63,7 +63,7 @@ pub enum LoginMessage {
 pub struct LoginPage {
     message_tx: Sender<AppMessage>,
     map_function: Box<dyn Fn(LoginMessage) -> AppMessage>,
-    network: Rc<RefCell<dyn Network>>,
+    network: Weak<RefCell<dyn Network>>,
     username: String,
     password: String,
     captcha: String,
@@ -76,11 +76,12 @@ impl LoginPage {
     pub fn new(
         message_tx: Sender<AppMessage>,
         map_function: Box<dyn Fn(LoginMessage) -> AppMessage>,
+        network: Weak<RefCell<dyn Network>>,
     ) -> Self {
         Self {
-            message_tx,
+            message_tx: message_tx.clone(),
             map_function,
-            network: Rc::new(RefCell::new(NetworkImpl {})),
+            network,
             username: "".to_string(),
             password: "".to_string(),
             captcha: "".to_string(),
@@ -155,7 +156,7 @@ impl View for LoginPage {
                 if let Some(texture) = self.captcha_texture.as_ref() {
                     let image_button = egui::ImageButton::new(texture);
                     if ui.add(image_button).clicked() {
-                        self.network
+                        self.network.upgrade().unwrap()
                             .borrow_mut()
                             .fetch_captcha(
                                 1000,

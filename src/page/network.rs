@@ -3,9 +3,12 @@
 
 use crate::shell::AppMessage;
 use anyhow::Result;
+use tracing::trace;
 
 pub enum NetworkEvent {
     Placeholder,
+    CaptchaFetched(u64, String),
+    CaptchaFailed(u64),
 }
 
 pub trait Network {
@@ -22,20 +25,25 @@ pub trait Network {
     fn cancel(&mut self, generation: u64) -> Result<()>;
 }
 
-pub struct NetworkImpl {}
+pub struct FakeNetwork {
+    message_tx: crossbeam_channel::Sender<AppMessage>,
+}
 
-impl NetworkImpl {
-    pub fn new() -> Self {
-        Self {}
+impl FakeNetwork {
+    pub fn new(message_tx: crossbeam_channel::Sender<AppMessage>) -> Self {
+        Self {
+            message_tx,
+        }
     }
 }
 
-impl Network for NetworkImpl {
+impl Network for FakeNetwork {
     fn fetch_captcha(
         &mut self,
         timeout: u32,
         map_function: Box<dyn FnOnce(NetworkEvent) -> AppMessage>,
     ) -> Result<u64> {
+        trace!("Fetching captcha");
         Ok(0)
     }
 
