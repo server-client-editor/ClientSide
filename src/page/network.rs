@@ -36,7 +36,7 @@ impl Network for NetworkImpl {
         timeout: u32,
         map_function: Box<dyn FnOnce(NetworkEvent) -> AppMessage>,
     ) -> Result<u64> {
-        todo!()
+        Ok(0)
     }
 
     fn login(
@@ -44,10 +44,10 @@ impl Network for NetworkImpl {
         timeout: u32,
         map_function: Box<dyn FnOnce(NetworkEvent) -> AppMessage>,
     ) -> Result<u64> {
-        todo!()
+        Ok(0)
     }
 
     fn cancel(&mut self, generation: u64) -> Result<()> {
-        todo!()
+        Ok(())
     }
 }
