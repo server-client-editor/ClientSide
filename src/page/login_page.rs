@@ -38,7 +38,7 @@
 //! }
 //! ```
 
-use crate::page::{Network, FakeNetwork, Update, View};
+use crate::page::{Network, FakeNetwork, Update, View, NetworkEvent};
 use crate::shell::AppMessage;
 use base64::Engine;
 use crossbeam_channel::Sender;
@@ -47,8 +47,6 @@ use eframe::egui::{TextBuffer, TextureHandle, TextureOptions};
 use std::cell::RefCell;
 use std::rc::Weak;
 use tracing::warn;
-
-const IMG_STR: &str = "iVBORw0KGgoAAAANSUhEUgAAAGQAAAAyCAMAAACd646MAAAAP1BMVEUAAAAAOnJjndUIQnpRi8OBu/N8tu4qZJwMRn6Lxf0KRHxSjMRalMwoYppmoNhrpd01b6cgWpI8dq4tZ58WUIhMzA4eAAAAAXRSTlMAQObYZgAAAapJREFUeJzsmM1yhCAMgJN1RmU86Pj+D9vpAiHEwAaxTA+bQ9WK+fKLZuEfysuyaO1kvAyUde2lWBZxBvbxTII4hDKA8YfiqncRnwiic2UKBomXbZp53TmAs8QAKgdPmxo4ooPOU6VEDwIEAKZpskNkB+mepDBhPJ8IDI/kSoXEI0tWZ2VoEIqdT1fC3QWR8QpDGHLfFyquC0QylMfsECRCyoU/R10hxa0hgpiUstAjQsp6vh4yRkuuqIgAgTWmVIOpQLg/NaX6Jd8DGAxSJMOdgq4SJSslBLkTgPCQ940/Fl+diELxWw5Rryz+6ZD5+OEjwK9w3KnjODQIUBEiwJwZ+v5X7SPg98H4GggWlzxJV/M8i2iw3C8FjAPuff642FL8X8lgUVkWlZLMELVISZAk0BhQ84SZq9JZ0V4oBqZOCvVJHY+8waFCsFLCyitW06D3+QMvA4u2MmZvJldMLmxm+/6ZcghFrWZZPIk7QUBUGFs7PlGM67ath2KVEYyvfOWG1Ie1hxiVYY2ke86wMIbM72Mow38l4N8ULWNoE4NB2obdJspPAAAA//9aeATJZ1KZSAAAAABJRU5ErkJggg==";
 
 pub enum LoginMessage {
     PlaceHolder,
@@ -78,6 +76,9 @@ impl LoginPage {
         map_function: Box<dyn Fn(LoginMessage) -> AppMessage>,
         network: Weak<RefCell<dyn Network>>,
     ) -> Self {
+        let mut captcha_generation = None;
+        fetch_captcha(&mut captcha_generation, network.clone());
+        
         Self {
             message_tx: message_tx.clone(),
             map_function,
@@ -85,8 +86,8 @@ impl LoginPage {
             username: "".to_string(),
             password: "".to_string(),
             captcha: "".to_string(),
-            captcha_generation: None,
-            captcha_base64: IMG_STR.to_string(),
+            captcha_generation,
+            captcha_base64: "".to_string(),
             captcha_texture: None,
         }
     }
@@ -107,6 +108,7 @@ impl Update<LoginMessage> for LoginPage {
             LoginMessage::CaptchaFailed(generation) => {
                 if self.captcha_generation == Some(generation) {
                     self.captcha_generation = None;
+                    self.captcha_texture = None;
                 } else {
                     warn!("Drop one failed message due to generation mismatch");
                 }
@@ -156,23 +158,18 @@ impl View for LoginPage {
                 if let Some(texture) = self.captcha_texture.as_ref() {
                     let image_button = egui::ImageButton::new(texture);
                     if ui.add(image_button).clicked() {
-                        self.network.upgrade().unwrap()
-                            .borrow_mut()
-                            .fetch_captcha(
-                                1000,
-                                Box::new(|e| {
-                                    AppMessage::Login(LoginMessage::CaptchaFetched(1, "".into()))
-                                }),
-                            )
-                            .unwrap_or_default();
+                        self.captcha_texture = None;
+                        fetch_captcha(&mut self.captcha_generation, self.network.clone());
                     }
-                } else if let Some(captcha_generation) = self.captcha_generation {
+                } else if let Some(_) = self.captcha_generation {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new());
                         ui.label("Loading captcha...");
                     });
                 } else {
-                    if ui.button("Reload captcha").clicked() {}
+                    if ui.button("Reload captcha").clicked() {
+                        fetch_captcha(&mut self.captcha_generation, self.network.clone());
+                    }
                 }
                 
                 ui.separator();
@@ -196,6 +193,26 @@ impl View for LoginPage {
                 });
             });
     }
+}
+
+fn fetch_captcha(captcha_generation: &mut Option<u64>, network: Weak<RefCell<dyn Network>>) {
+    let map_function = |e: NetworkEvent| {
+        match e {
+            NetworkEvent::CaptchaFetched(generation, captcha) => {
+                AppMessage::Login(LoginMessage::CaptchaFetched(generation, captcha))
+            }
+            NetworkEvent::CaptchaFailed(generation) => {
+                AppMessage::Login(LoginMessage::CaptchaFailed(generation))
+            }
+            _ => { AppMessage::Login(LoginMessage::PlaceHolder) }
+        }
+    };
+    *captcha_generation = network.upgrade().unwrap()
+        .borrow_mut()
+        .fetch_captcha(
+            1000,
+            Box::new(map_function),
+        ).ok();
 }
 
 fn load_base64_texture(ctx: &egui::Context, encoded: &str, name: &str) -> Option<TextureHandle> {
