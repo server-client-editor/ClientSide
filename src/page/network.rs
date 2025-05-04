@@ -59,13 +59,11 @@ impl Network for FakeNetwork {
         
         let generation = self.generation.fetch_add(1, Ordering::Relaxed);
         let message_tx = self.message_tx.clone();
-        let mut message = AppMessage::PlaceHolder;
-        if generation % 3 == 0 {
-            message = map_function(NetworkEvent::CaptchaFetched(generation, String::from(IMG_STR_0)));
-        } else if generation % 3 == 1 {
-            message = map_function(NetworkEvent::CaptchaFetched(generation, String::from(IMG_STR_1)));
-        } else if generation % 3 == 2 {
-            message = map_function(NetworkEvent::CaptchaFailed(generation));
+        let message = match generation % 3 {
+            0 => map_function(NetworkEvent::CaptchaFetched(generation, String::from(IMG_STR_0))),
+            1 => map_function(NetworkEvent::CaptchaFetched(generation, String::from(IMG_STR_1))),
+            2 => map_function(NetworkEvent::CaptchaFailed(generation)),
+            _ => map_function(NetworkEvent::Placeholder),
         };
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(timeout as u64));
