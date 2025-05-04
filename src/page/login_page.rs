@@ -38,7 +38,7 @@
 //! }
 //! ```
 
-use crate::page::{Network, FakeNetwork, Update, View, NetworkEvent};
+use crate::page::{FakeNetwork, Network, NetworkEvent, Update, View};
 use crate::shell::AppMessage;
 use base64::Engine;
 use crossbeam_channel::Sender;
@@ -46,7 +46,7 @@ use eframe::egui;
 use eframe::egui::{TextBuffer, TextureHandle, TextureOptions};
 use std::cell::RefCell;
 use std::rc::Weak;
-use tracing::warn;
+use tracing::{trace, warn};
 
 pub enum LoginMessage {
     PlaceHolder,
@@ -55,7 +55,15 @@ pub enum LoginMessage {
     CaptchaChanged(String),
     CaptchaFetched(u64, String),
     CaptchaFailed(u64),
+    LoginSuccess(u64, String, String),
+    LoginFailed(u64),
     NavigateTo(String),
+}
+
+pub enum LoginState {
+    RequestSent,
+    Success(String, String),
+    Failure(String),
 }
 
 pub struct LoginPage {
@@ -64,10 +72,14 @@ pub struct LoginPage {
     network: Weak<RefCell<dyn Network>>,
     username: String,
     password: String,
+
     captcha: String,
     captcha_generation: Option<u64>,
     captcha_base64: String,
     captcha_texture: Option<TextureHandle>,
+
+    login_generation: Option<u64>,
+    login_state: Option<LoginState>,
 }
 
 impl LoginPage {
@@ -78,7 +90,7 @@ impl LoginPage {
     ) -> Self {
         let mut captcha_generation = None;
         fetch_captcha(&mut captcha_generation, network.clone());
-        
+
         Self {
             message_tx: message_tx.clone(),
             map_function,
@@ -89,6 +101,8 @@ impl LoginPage {
             captcha_generation,
             captcha_base64: "".to_string(),
             captcha_texture: None,
+            login_generation: None,
+            login_state: None,
         }
     }
 }
@@ -109,6 +123,18 @@ impl Update<LoginMessage> for LoginPage {
                 if self.captcha_generation == Some(generation) {
                     self.captcha_generation = None;
                     self.captcha_texture = None;
+                } else {
+                    warn!("Drop one failed message due to generation mismatch");
+                }
+            }
+            LoginMessage::LoginSuccess(generation, address, jwt) => {
+                if self.login_generation == Some(generation) {
+                    self.login_state = Some(LoginState::Success(address, jwt));
+                }
+            }
+            LoginMessage::LoginFailed(generation) => {
+                if self.login_generation == Some(generation) {
+                    self.login_state = Some(LoginState::Failure("Login failed".to_string()));
                 } else {
                     warn!("Drop one failed message due to generation mismatch");
                 }
@@ -148,7 +174,11 @@ impl View for LoginPage {
                 ui.label("Captcha:");
                 if ui.text_edit_singleline(&mut self.captcha).changed() {
                     let map_function = self.map_function.as_ref();
-                    self.message_tx.send(map_function(LoginMessage::CaptchaChanged("captcha".to_string()))).unwrap_or_default();
+                    self.message_tx
+                        .send(map_function(LoginMessage::CaptchaChanged(
+                            "captcha".to_string(),
+                        )))
+                        .unwrap_or_default();
                 }
                 if !self.captcha_base64.is_empty() {
                     let base64_string = self.captcha_base64.take();
@@ -171,7 +201,7 @@ impl View for LoginPage {
                         fetch_captcha(&mut self.captcha_generation, self.network.clone());
                     }
                 }
-                
+
                 ui.separator();
 
                 ui.horizontal(|ui| {
@@ -183,12 +213,47 @@ impl View for LoginPage {
                             )))
                             .unwrap_or_default();
                     }
+                    
+                    let enabled = matches!(
+                        self.login_state,
+                        None | Some(LoginState::Failure(_)),
+                    );
+                    if ui.add_enabled(enabled, egui::Button::new("Submit")).clicked() {
+                        self.login_state = Some(LoginState::RequestSent);
+                        let map_function = |e| match e {
+                            NetworkEvent::LoginSucceeded(generation, address, jwt) => {
+                                AppMessage::Login(LoginMessage::LoginSuccess(
+                                    generation, address, jwt,
+                                ))
+                            }
+                            NetworkEvent::LoginFailed(generation) => {
+                                AppMessage::Login(LoginMessage::LoginFailed(generation))
+                            }
+                            _ => AppMessage::PlaceHolder,
+                        };
+                        self.login_generation = self
+                            .network
+                            .upgrade()
+                            .unwrap()
+                            .borrow_mut()
+                            .login(self.username.clone(), self.password.clone(), self.captcha.clone(), 1000, Box::new(map_function))
+                            .ok();
+                    }
 
-                    if ui.button("Submit").clicked() {
-                        let map_function = self.map_function.as_ref();
-                        self.message_tx
-                            .send(map_function(LoginMessage::NavigateTo("Submit".to_string())))
-                            .unwrap_or_default();
+                    if let Some(ref state) = self.login_state {
+                        ui.horizontal(|ui| match state {
+                            LoginState::RequestSent => {
+                                ui.add(egui::Spinner::new());
+                                ui.label("Waiting for authentication...");
+                            }
+                            LoginState::Success(_, _) => {
+                                ui.add(egui::Spinner::new());
+                                ui.label("Establishing connection...");
+                            }
+                            LoginState::Failure(reason) => {
+                                ui.label(format!("Login failed: {}", reason));
+                            }
+                        });
                     }
                 });
             });
@@ -196,27 +261,27 @@ impl View for LoginPage {
 }
 
 fn fetch_captcha(captcha_generation: &mut Option<u64>, network: Weak<RefCell<dyn Network>>) {
-    let map_function = |e: NetworkEvent| {
-        match e {
-            NetworkEvent::CaptchaFetched(generation, captcha) => {
-                AppMessage::Login(LoginMessage::CaptchaFetched(generation, captcha))
-            }
-            NetworkEvent::CaptchaFailed(generation) => {
-                AppMessage::Login(LoginMessage::CaptchaFailed(generation))
-            }
-            _ => { AppMessage::Login(LoginMessage::PlaceHolder) }
+    let map_function = |e: NetworkEvent| match e {
+        NetworkEvent::CaptchaFetched(generation, captcha) => {
+            AppMessage::Login(LoginMessage::CaptchaFetched(generation, captcha))
         }
+        NetworkEvent::CaptchaFailed(generation) => {
+            AppMessage::Login(LoginMessage::CaptchaFailed(generation))
+        }
+        _ => AppMessage::Login(LoginMessage::PlaceHolder),
     };
-    *captcha_generation = network.upgrade().unwrap()
+    *captcha_generation = network
+        .upgrade()
+        .unwrap()
         .borrow_mut()
-        .fetch_captcha(
-            1000,
-            Box::new(map_function),
-        ).ok();
+        .fetch_captcha(1000, Box::new(map_function))
+        .ok();
 }
 
 fn load_base64_texture(ctx: &egui::Context, encoded: &str, name: &str) -> Option<TextureHandle> {
-    let decoded = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
     let image_data = image::load_from_memory(&decoded).ok()?;
     let size = [image_data.width() as _, image_data.height() as _];
     let rgba = image_data.to_rgba8();

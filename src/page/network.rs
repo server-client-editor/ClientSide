@@ -13,6 +13,9 @@ pub enum NetworkEvent {
     Placeholder,
     CaptchaFetched(u64, String),
     CaptchaFailed(u64),
+    LoginSucceeded(u64, String, String),
+    LoginFailed(u64),
+    LoginTimeout(u64),
 }
 
 pub trait Network {
@@ -23,6 +26,9 @@ pub trait Network {
     ) -> Result<u64>;
     fn login(
         &mut self,
+        username: String,
+        password: String,
+        captcha: String,
         timeout: u32,
         map_function: Box<dyn FnOnce(NetworkEvent) -> AppMessage>,
     ) -> Result<u64>;
@@ -71,10 +77,27 @@ impl Network for FakeNetwork {
 
     fn login(
         &mut self,
+        username: String,
+        password: String,
+        captcha: String,
         timeout: u32,
         map_function: Box<dyn FnOnce(NetworkEvent) -> AppMessage>,
     ) -> Result<u64> {
-        Ok(0)
+        trace!("Logging in");
+        
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed);
+        let message_tx = self.message_tx.clone();
+        let messages = match generation % 2 {
+            0 => map_function(NetworkEvent::LoginFailed(generation)),
+            1 => map_function(NetworkEvent::LoginSucceeded(generation, "addr".into(), "jwt".into())),
+            _ => map_function(NetworkEvent::Placeholder)
+        }; 
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(timeout as u64));
+            message_tx.send(messages).unwrap();
+        });
+        
+        Ok(generation)
     }
 
     fn cancel(&mut self, generation: u64) -> Result<()> {
