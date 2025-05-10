@@ -107,7 +107,12 @@ impl App {
         App {
             lifecycle: Lifecycle::Running,
             network: network.clone(),
-            current_page: Page::Lobby(page::LobbyPage::new()),
+            current_page: Page::Lobby(page::LobbyPage::new(
+                message_tx.clone(),
+                Box::new(|m| AppMessage::Lobby(m)),
+                Rc::downgrade(&network),
+                0u64,
+            )),
             // current_page: Page::Login(page::LoginPage::new(
             //     message_tx.clone(),
             //     Box::new(|m| AppMessage::Login(m)),
@@ -137,6 +142,7 @@ pub enum AppMessage {
     Exiting,
     PlaceHolder,
 
+    Lobby(page::LobbyMessage),
     Login(page::LoginMessage),
 }
 
@@ -178,6 +184,12 @@ impl App {
             }
             AppMessage::Quit => {
                 self.lifecycle = Lifecycle::QuitingShell;
+            }
+            AppMessage::Lobby(message) => match &mut self.current_page {
+                Page::Lobby(inner) => {
+                    inner.update_one(message);
+                }
+                _ => {}
             }
             AppMessage::Login(message) => match &mut self.current_page {
                 Page::Login(inner) => {
