@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Weak;
 use crossbeam_channel::Sender;
-use crate::page::{LoginMessage, Network, NetworkEvent, Update, View};
+use crate::page::{LoginMessage, Network, NetworkEvent, Route, Update, View};
 use eframe::egui;
 use eframe::egui::Context;
 use crate::shell::AppMessage;
@@ -65,6 +65,12 @@ impl View for LobbyPage {
             .resizable(false)
             .anchor(egui::Align2::CENTER_BOTTOM, [0.0, 0.0])
             .show(ctx, |ui| {
+                if ui.button("Logout").clicked() {
+                    self.message_tx.send(AppMessage::ReqNavigate(Route::LoginPage)).unwrap();
+                }
+
+                ui.separator();
+
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)

@@ -4,7 +4,7 @@ use crossbeam_channel::Sender;
 use eframe::egui;
 use eframe::egui::Context;
 use tracing::trace;
-use crate::page::{Network, View};
+use crate::page::{Network, Route, View};
 use crate::shell::AppMessage;
 
 #[derive(Debug)]
@@ -40,6 +40,7 @@ impl View for SignupPage {
                 ui.horizontal(|ui| {
                     if ui.button("Go Login").clicked() {
                         trace!("Go Login on Signup");
+                        self.message_tx.send(AppMessage::ReqNavigate(Route::LoginPage)).unwrap();
                     }
                     if ui.button("Submit").clicked() {
                         trace!("Submit on Signup");

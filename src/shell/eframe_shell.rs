@@ -67,7 +67,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use crate::page::{Network, FakeNetwork, Update, View};
+use crate::page::{Network, FakeNetwork, Update, View, Route, LoginPage, SignupPage, NetworkEvent, LoginMessage};
 use crate::*;
 use anyhow::{anyhow, Result};
 use eframe::egui;
@@ -95,6 +95,7 @@ pub enum Page {
 pub struct App {
     lifecycle: Lifecycle,
     network: Rc<RefCell<dyn Network>>,
+    chat_generation: Option<u64>,
     current_page: Page,
     message_tx: crossbeam_channel::Sender<AppMessage>,
     message_rx: crossbeam_channel::Receiver<AppMessage>,
@@ -108,22 +109,12 @@ impl App {
         App {
             lifecycle: Lifecycle::Running,
             network: network.clone(),
-            current_page: Page::Signup(page::SignupPage::new(
+            chat_generation: None,
+            current_page: Page::Login(page::LoginPage::new(
                 message_tx.clone(),
-                Box::new(|m| AppMessage::Signup(m)),
+                Box::new(|m| AppMessage::Login(m)),
                 Rc::downgrade(&network),
             )),
-            // current_page: Page::Lobby(page::LobbyPage::new(
-            //         message_tx.clone(),
-            //         Box::new(|m| AppMessage::Lobby(m)),
-            //         Rc::downgrade(&network),
-            //         0u64,
-            //     )),
-            // current_page: Page::Login(page::LoginPage::new(
-            //     message_tx.clone(),
-            //     Box::new(|m| AppMessage::Login(m)),
-            //     Rc::downgrade(&network),
-            // )),
             message_tx,
             message_rx,
             polling_interval: IDLE_POLLING_INTERVAL,
@@ -151,6 +142,8 @@ pub enum AppMessage {
     Lobby(page::LobbyMessage),
     Login(page::LoginMessage),
     Signup(page::SignupMessage),
+
+    ReqNavigate(Route)
 }
 
 impl App {
@@ -210,6 +203,60 @@ impl App {
                 }
                 _ => {}
             }
+            AppMessage::ReqNavigate(route) => {
+                debug!("Navigating to {:?}", route);
+                match route {
+                    Route::LoginPage => {
+                        let login_page = LoginPage::new(
+                            self.message_tx.clone(),
+                            Box::new(|m| AppMessage::Login(m)),
+                            Rc::downgrade(&self.network),
+                        );
+                        self.current_page = Page::Login(login_page);
+                    }
+                    Route::SignupPage => {
+                        let signup_page = SignupPage::new(
+                            self.message_tx.clone(),
+                            Box::new(|m| AppMessage::Signup(m)),
+                            Rc::downgrade(&self.network),
+                        );
+                        self.current_page = Page::Signup(signup_page);
+                    }
+                    Route::LobbyPage(address, jwt) => {
+                        self.chat_generation = self.network.borrow_mut().connect_chat(
+                            address,
+                            jwt,
+                            1000,
+                            Box::new(|e| {
+                                match e {
+                                    NetworkEvent::ChatConnSucceeded(generation) => {
+                                        AppMessage::ReqNavigate(Route::ChatConnSuccess)
+                                    }
+                                    NetworkEvent::ChatConnFailed(generation) => {
+                                        AppMessage::ReqNavigate(Route::ChatConnFailure)
+                                    }
+                                    _ => {AppMessage::PlaceHolder}
+                                }
+                            }),
+                        ).ok();
+                    }
+                    Route::ChatConnSuccess => {
+                        let lobby_page = page::LobbyPage::new(
+                            self.message_tx.clone(),
+                            Box::new(|m| AppMessage::Lobby(m)),
+                            Rc::downgrade(&self.network),
+                            0u64,
+                        );
+                        self.current_page = Page::Lobby(lobby_page);
+                    }
+                    Route::ChatConnFailure => {
+                        self.message_tx.send(AppMessage::Login(LoginMessage::ChatFailed)).unwrap();
+                    }
+                    _ => {
+                        warn!("Not implemented yet! {:?}", route);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -235,6 +282,7 @@ impl App {
         App {
             lifecycle: Lifecycle::Running,
             network: Rc::new(RefCell::new(FakeNetwork::new(message_tx.clone()))),
+            chat_generation: None,
             current_page: Page::Fatal(page::FatalPage::new("fatal error".into())),
             message_tx,
             message_rx,

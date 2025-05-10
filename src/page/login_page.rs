@@ -38,7 +38,7 @@
 //! }
 //! ```
 
-use crate::page::{FakeNetwork, Network, NetworkEvent, Update, View};
+use crate::page::{FakeNetwork, Network, NetworkEvent, Route, Update, View};
 use crate::shell::AppMessage;
 use base64::Engine;
 use crossbeam_channel::Sender;
@@ -57,6 +57,7 @@ pub enum LoginMessage {
     CaptchaFailed(u64),
     LoginSuccess(u64, String, String),
     LoginFailed(u64),
+    ChatFailed,
     NavigateTo(String),
 }
 
@@ -64,6 +65,7 @@ pub enum LoginState {
     RequestSent,
     Success(String, String),
     Failure(String),
+    ChatFailed,
 }
 
 pub struct LoginPage {
@@ -129,7 +131,8 @@ impl Update<LoginMessage> for LoginPage {
             }
             LoginMessage::LoginSuccess(generation, address, jwt) => {
                 if self.login_generation == Some(generation) {
-                    self.login_state = Some(LoginState::Success(address, jwt));
+                    self.login_state = Some(LoginState::Success(address.clone(), jwt.clone()));
+                    self.message_tx.send(AppMessage::ReqNavigate(Route::LobbyPage(address, jwt))).unwrap();
                 }
             }
             LoginMessage::LoginFailed(generation) => {
@@ -138,6 +141,9 @@ impl Update<LoginMessage> for LoginPage {
                 } else {
                     warn!("Drop one failed message due to generation mismatch");
                 }
+            }
+            LoginMessage::ChatFailed => {
+                self.login_state = Some(LoginState::ChatFailed);
             }
             _ => {}
         }
@@ -206,17 +212,18 @@ impl View for LoginPage {
 
                 ui.horizontal(|ui| {
                     if ui.button("Sign up").clicked() {
-                        let map_function = self.map_function.as_ref();
-                        self.message_tx
-                            .send(map_function(LoginMessage::NavigateTo(
-                                "Sign up".to_string(),
-                            )))
-                            .unwrap_or_default();
+                        self.message_tx.send(AppMessage::ReqNavigate(Route::SignupPage)).unwrap();
+                        // let map_function = self.map_function.as_ref();
+                        // self.message_tx
+                        //     .send(map_function(LoginMessage::NavigateTo(
+                        //         "Sign up".to_string(),
+                        //     )))
+                        //     .unwrap_or_default();
                     }
-                    
+
                     let enabled = matches!(
                         self.login_state,
-                        None | Some(LoginState::Failure(_)),
+                        None | Some(LoginState::Failure(_)) | Some(LoginState::ChatFailed),
                     );
                     if ui.add_enabled(enabled, egui::Button::new("Submit")).clicked() {
                         self.login_state = Some(LoginState::RequestSent);
@@ -252,6 +259,9 @@ impl View for LoginPage {
                             }
                             LoginState::Failure(reason) => {
                                 ui.label(format!("Login failed: {}", reason));
+                            }
+                            LoginState::ChatFailed => {
+                                ui.label("Failed to connect to chat server. Please retry.");
                             }
                         });
                     }

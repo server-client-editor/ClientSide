@@ -17,6 +17,8 @@ pub enum NetworkEvent {
     LoginSucceeded(u64, String, String),
     LoginFailed(u64),
     LoginTimeout(u64),
+    ChatConnSucceeded(u64),
+    ChatConnFailed(u64),
     ChatSent(u64, String),
     ChatReceived(u64, String),
 }
@@ -32,6 +34,13 @@ pub trait Network {
         username: String,
         password: String,
         captcha: String,
+        timeout: u32,
+        map_function: Box<dyn FnOnce(NetworkEvent) -> AppMessage>,
+    ) -> Result<u64>;
+    fn connect_chat(
+        &mut self,
+        address: String,
+        jwt: String,
         timeout: u32,
         map_function: Box<dyn FnOnce(NetworkEvent) -> AppMessage>,
     ) -> Result<u64>;
@@ -107,6 +116,33 @@ impl Network for FakeNetwork {
             message_tx.send(messages).unwrap();
         });
 
+        Ok(generation)
+    }
+    
+    fn connect_chat(
+        &mut self,
+        address: String,
+        jwt: String,
+        timeout: u32,
+        map_function: Box<dyn FnOnce(NetworkEvent) -> AppMessage>,
+    ) -> Result<u64> {
+        trace!("Connecting chat");
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed);
+        trace!("Chat connection generation: {}", generation);
+        
+        let message_tx = self.message_tx.clone();
+        let app_message = match generation % 4 {
+            0 => map_function(NetworkEvent::ChatConnFailed(generation)),
+            1 => map_function(NetworkEvent::ChatConnFailed(generation)),
+            2 => map_function(NetworkEvent::ChatConnSucceeded(generation)),
+            3 => map_function(NetworkEvent::ChatConnSucceeded(generation)),
+            _ => map_function(NetworkEvent::Placeholder)
+        };
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(timeout as u64));
+            message_tx.send(app_message).unwrap();
+        });
+        
         Ok(generation)
     }
 
