@@ -68,6 +68,7 @@ impl Network for FakeNetwork {
         trace!("Fetching captcha");
 
         let generation = self.generation.fetch_add(1, Ordering::Relaxed);
+        trace!("Captcha generation: {}", generation);
         let message_tx = self.message_tx.clone();
         let message = match generation % 3 {
             0 => map_function(NetworkEvent::CaptchaFetched(generation, String::from(IMG_STR_0))),
@@ -94,6 +95,7 @@ impl Network for FakeNetwork {
         trace!("Logging in");
 
         let generation = self.generation.fetch_add(1, Ordering::Relaxed);
+        trace!("Login generation: {}", generation);
         let message_tx = self.message_tx.clone();
         let messages = match generation % 2 {
             0 => map_function(NetworkEvent::LoginFailed(generation)),
