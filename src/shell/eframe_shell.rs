@@ -89,6 +89,7 @@ pub enum Page {
     Lobby(page::LobbyPage),
     Login(page::LoginPage),
     Shutdown(page::ShutdownPage),
+    Signup(page::SignupPage),
 }
 
 pub struct App {
@@ -107,12 +108,17 @@ impl App {
         App {
             lifecycle: Lifecycle::Running,
             network: network.clone(),
-            current_page: Page::Lobby(page::LobbyPage::new(
+            current_page: Page::Signup(page::SignupPage::new(
                 message_tx.clone(),
-                Box::new(|m| AppMessage::Lobby(m)),
+                Box::new(|m| AppMessage::Signup(m)),
                 Rc::downgrade(&network),
-                0u64,
             )),
+            // current_page: Page::Lobby(page::LobbyPage::new(
+            //         message_tx.clone(),
+            //         Box::new(|m| AppMessage::Lobby(m)),
+            //         Rc::downgrade(&network),
+            //         0u64,
+            //     )),
             // current_page: Page::Login(page::LoginPage::new(
             //     message_tx.clone(),
             //     Box::new(|m| AppMessage::Login(m)),
@@ -144,6 +150,7 @@ pub enum AppMessage {
 
     Lobby(page::LobbyMessage),
     Login(page::LoginMessage),
+    Signup(page::SignupMessage),
 }
 
 impl App {
@@ -197,6 +204,12 @@ impl App {
                 }
                 _ => {}
             },
+            AppMessage::Signup(message) => match &mut self.current_page {
+                Page::Signup(inner) => {
+
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -210,6 +223,7 @@ impl App {
             Page::Lobby(inner) => inner.view(ctx),
             Page::Login(inner) => inner.view(ctx),
             Page::Shutdown(inner) => inner.view(ctx),
+            Page::Signup(inner) => inner.view(ctx),
         }
     }
 }
