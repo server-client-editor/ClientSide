@@ -86,6 +86,7 @@ pub enum Lifecycle {
 
 pub enum Page {
     Fatal(page::FatalPage),
+    Lobby(page::LobbyPage),
     Login(page::LoginPage),
     Shutdown(page::ShutdownPage),
 }
@@ -106,11 +107,12 @@ impl App {
         App {
             lifecycle: Lifecycle::Running,
             network: network.clone(),
-            current_page: Page::Login(page::LoginPage::new(
-                message_tx.clone(),
-                Box::new(|m| AppMessage::Login(m)),
-                Rc::downgrade(&network),
-            )),
+            current_page: Page::Lobby(page::LobbyPage::new()),
+            // current_page: Page::Login(page::LoginPage::new(
+            //     message_tx.clone(),
+            //     Box::new(|m| AppMessage::Login(m)),
+            //     Rc::downgrade(&network),
+            // )),
             message_tx,
             message_rx,
             polling_interval: IDLE_POLLING_INTERVAL,
@@ -193,6 +195,7 @@ impl App {
     pub fn view(&mut self, ctx: &egui::Context) {
         match &mut self.current_page {
             Page::Fatal(inner) => inner.view(ctx),
+            Page::Lobby(inner) => inner.view(ctx),
             Page::Login(inner) => inner.view(ctx),
             Page::Shutdown(inner) => inner.view(ctx),
         }
