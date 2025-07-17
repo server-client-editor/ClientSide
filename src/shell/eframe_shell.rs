@@ -67,12 +67,14 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use crate::page::{Network, FakeNetwork, Update, View, Route, LoginPage, SignupPage, NetworkEvent, LoginMessage};
+use std::sync::Arc;
+use crate::page::{Network, FakeNetwork, Update, View, Route, LoginPage, SignupPage, NetworkEvent, LoginMessage, LobbyMessage};
 use crate::*;
 use anyhow::{anyhow, Result};
 use eframe::egui;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, trace, warn};
+use crate::protocol::network::{ChatConnError, ChatMetaData, NetworkImpl, NetworkInterface, SessionEvent, StreamMessage, WithGeneration};
 
 const IDLE_POLLING_INTERVAL: Duration = Duration::from_millis(100);
 const FAST_POLLING_INTERVAL: Duration = Duration::from_millis(16);
@@ -95,7 +97,9 @@ pub enum Page {
 pub struct App {
     lifecycle: Lifecycle,
     network: Rc<RefCell<dyn Network>>,
+    real_network: Rc<RefCell<dyn NetworkInterface>>,
     chat_generation: Option<u64>,
+    stream_buffer: Vec<StreamMessage>,
     current_page: Page,
     message_tx: crossbeam_channel::Sender<AppMessage>,
     message_rx: crossbeam_channel::Receiver<AppMessage>,
@@ -106,14 +110,19 @@ impl App {
     pub fn new() -> App {
         let (message_tx, message_rx) = crossbeam_channel::unbounded();
         let network: Rc<RefCell<dyn Network>> = Rc::new(RefCell::new(FakeNetwork::new(message_tx.clone())));
+        let real_network = Rc::new(RefCell::new(NetworkImpl::try_new().unwrap()));
         App {
             lifecycle: Lifecycle::Running,
             network: network.clone(),
+            real_network: real_network.clone(),
             chat_generation: None,
+            stream_buffer: Vec::new(),
             current_page: Page::Login(page::LoginPage::new(
                 message_tx.clone(),
                 Box::new(|m| AppMessage::Login(m)),
+                Arc::new(Box::new(|m| AppMessage::Login(m))),
                 Rc::downgrade(&network),
+                real_network,
             )),
             message_tx,
             message_rx,
@@ -143,7 +152,9 @@ pub enum AppMessage {
     Login(page::LoginMessage),
     Signup(page::SignupMessage),
 
-    ReqNavigate(Route)
+    ReqNavigate(Route),
+
+    Stream(StreamMessage),
 }
 
 impl App {
@@ -210,7 +221,9 @@ impl App {
                         let login_page = LoginPage::new(
                             self.message_tx.clone(),
                             Box::new(|m| AppMessage::Login(m)),
+                            Arc::new(Box::new(|m| AppMessage::Login(m))),
                             Rc::downgrade(&self.network),
+                            self.real_network.clone(),
                         );
                         self.current_page = Page::Login(login_page);
                     }
@@ -223,37 +236,82 @@ impl App {
                         self.current_page = Page::Signup(signup_page);
                     }
                     Route::LobbyPage(address, jwt) => {
-                        self.chat_generation = self.network.borrow_mut().connect_chat(
+                        let message_tx = self.message_tx.clone();
+                        let map = move |event: WithGeneration<SessionEvent>| {
+                            let message = match event.result.result {
+                                Ok(_) => AppMessage::ReqNavigate(Route::ChatConnSuccess),
+                                Err(_) => AppMessage::ReqNavigate(Route::ChatConnFailure),
+                            };
+                            let _ = message_tx.send(message);
+                        };
+
+                        let message_tx = self.message_tx.clone();
+                        let map_err = move |_error| {
+                            let _ = message_tx.send(AppMessage::ReqNavigate(Route::ChatConnFailure));
+                        };
+
+                        let message_tx = self.message_tx.clone();
+                        self.chat_generation = self.real_network.borrow_mut().connect_chat(
                             address,
                             jwt,
-                            1000,
-                            Box::new(|e| {
-                                match e {
-                                    NetworkEvent::ChatConnSucceeded(generation) => {
-                                        AppMessage::ReqNavigate(Route::ChatConnSuccess)
-                                    }
-                                    NetworkEvent::ChatConnFailed(generation) => {
-                                        AppMessage::ReqNavigate(Route::ChatConnFailure)
-                                    }
-                                    _ => {AppMessage::PlaceHolder}
-                                }
+                            Box::new(move |message| {
+                                let _ = message_tx.send(AppMessage::Stream(message));
                             }),
+                            1000,
+                            Box::new(map),
+                            Box::new(map_err),
                         ).ok();
+
+                        // self.chat_generation = self.network.borrow_mut().connect_chat(
+                        //     address,
+                        //     jwt,
+                        //     1000,
+                        //     Box::new(|e| {
+                        //         match e {
+                        //             NetworkEvent::ChatConnSucceeded(generation) => {
+                        //                 AppMessage::ReqNavigate(Route::ChatConnSuccess)
+                        //             }
+                        //             NetworkEvent::ChatConnFailed(generation) => {
+                        //                 AppMessage::ReqNavigate(Route::ChatConnFailure)
+                        //             }
+                        //             _ => {AppMessage::PlaceHolder}
+                        //         }
+                        //     }),
+                        // ).ok();
                     }
                     Route::ChatConnSuccess => {
                         let lobby_page = page::LobbyPage::new(
                             self.message_tx.clone(),
                             Box::new(|m| AppMessage::Lobby(m)),
+                            Arc::new(Box::new(|m| AppMessage::Lobby(m))),
                             Rc::downgrade(&self.network),
+                            self.real_network.clone(),
                             0u64,
                         );
                         self.current_page = Page::Lobby(lobby_page);
                     }
                     Route::ChatConnFailure => {
-                        self.message_tx.send(AppMessage::Login(LoginMessage::ChatFailed)).unwrap();
+                        let _ = self.message_tx.send(AppMessage::Login(LoginMessage::ChatFailed));
                     }
                     _ => {
                         warn!("Not implemented yet! {:?}", route);
+                    }
+                }
+            }
+            AppMessage::Stream(message) => {
+                match &mut self.current_page {
+                    Page::Lobby(inner) => {
+                        for m in self.stream_buffer.drain(..) {
+                            inner.update_one(LobbyMessage::Stream(m));
+                        }
+                        inner.update_one(LobbyMessage::Stream(message));
+                    }
+                    _ => {
+                        if self.stream_buffer.len() < 1024 {
+                            self.stream_buffer.push(message);
+                        } else {
+                            error!("Drop stream message because buffer is full");
+                        }
                     }
                 }
             }
@@ -282,7 +340,9 @@ impl App {
         App {
             lifecycle: Lifecycle::Running,
             network: Rc::new(RefCell::new(FakeNetwork::new(message_tx.clone()))),
+            real_network: Rc::new(RefCell::new(NetworkImpl::try_new().unwrap())),
             chat_generation: None,
+            stream_buffer: Vec::new(),
             current_page: Page::Fatal(page::FatalPage::new("fatal error".into())),
             message_tx,
             message_rx,

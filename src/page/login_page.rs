@@ -45,15 +45,18 @@ use crossbeam_channel::Sender;
 use eframe::egui;
 use eframe::egui::{TextBuffer, TextureHandle, TextureOptions};
 use std::cell::RefCell;
-use std::rc::Weak;
-use tracing::{trace, warn};
+use std::rc::{Rc, Weak};
+use std::sync::Arc;
+use tracing::{event, trace, warn};
+use uuid::Uuid;
+use crate::protocol::network::{CaptchaData, CaptchaError, CaptchaEvent, LoginError, LoginEvent, NetworkError, NetworkInterface, TokenInfo, WithGeneration};
 
 pub enum LoginMessage {
     PlaceHolder,
     UsernameChanged(String),
     PasswordChanged(String),
     CaptchaChanged(String),
-    CaptchaFetched(u64, String),
+    CaptchaFetched(u64, Uuid, String),
     CaptchaFailed(u64),
     LoginSuccess(u64, String, String),
     LoginFailed(u64),
@@ -71,12 +74,15 @@ pub enum LoginState {
 pub struct LoginPage {
     message_tx: Sender<AppMessage>,
     map_function: Box<dyn Fn(LoginMessage) -> AppMessage>,
+    new_map_function: Arc<Box<dyn Fn(LoginMessage) -> AppMessage + Send + Sync>>,
     network: Weak<RefCell<dyn Network>>,
+    real_network: Rc<RefCell<dyn NetworkInterface>>,
     username: String,
     password: String,
 
     captcha: String,
     captcha_generation: Option<u64>,
+    captcha_id: Option<Uuid>,
     captcha_base64: String,
     captcha_texture: Option<TextureHandle>,
 
@@ -88,19 +94,25 @@ impl LoginPage {
     pub fn new(
         message_tx: Sender<AppMessage>,
         map_function: Box<dyn Fn(LoginMessage) -> AppMessage>,
+        new_map_function: Arc<Box<dyn Fn(LoginMessage) -> AppMessage + Send + Sync>>,
         network: Weak<RefCell<dyn Network>>,
+        real_network: Rc<RefCell<dyn NetworkInterface>>,
     ) -> Self {
         let mut captcha_generation = None;
-        fetch_captcha(&mut captcha_generation, network.clone());
+        // fetch_captcha(&mut captcha_generation, network.clone());
+        fetch_real_captcha(message_tx.clone(), new_map_function.clone(), &mut captcha_generation, real_network.clone());
 
         Self {
             message_tx: message_tx.clone(),
             map_function,
+            new_map_function,
             network,
+            real_network,
             username: "".to_string(),
             password: "".to_string(),
             captcha: "".to_string(),
             captcha_generation,
+            captcha_id: None,
             captcha_base64: "".to_string(),
             captcha_texture: None,
             login_generation: None,
@@ -114,8 +126,9 @@ impl Update<LoginMessage> for LoginPage {
         match message {
             LoginMessage::UsernameChanged(username) => self.username = username,
             LoginMessage::PasswordChanged(password) => self.password = password,
-            LoginMessage::CaptchaFetched(generation, base64_string) => {
+            LoginMessage::CaptchaFetched(generation, id, base64_string) => {
                 if self.captcha_generation == Some(generation) {
+                    self.captcha_id = Some(id);
                     self.captcha_base64 = base64_string;
                 } else {
                     warn!("Drop one fetched message due to generation mismatch");
@@ -195,7 +208,8 @@ impl View for LoginPage {
                     let image_button = egui::ImageButton::new(texture);
                     if ui.add(image_button).clicked() {
                         self.captcha_texture = None;
-                        fetch_captcha(&mut self.captcha_generation, self.network.clone());
+                        // fetch_captcha(&mut self.captcha_generation, self.network.clone());
+                        fetch_real_captcha(self.message_tx.clone(), self.new_map_function.clone(), &mut self.captcha_generation, self.real_network.clone());
                     }
                 } else if let Some(_) = self.captcha_generation {
                     ui.horizontal(|ui| {
@@ -204,7 +218,8 @@ impl View for LoginPage {
                     });
                 } else {
                     if ui.button("Reload captcha").clicked() {
-                        fetch_captcha(&mut self.captcha_generation, self.network.clone());
+                        // fetch_captcha(&mut self.captcha_generation, self.network.clone());
+                        fetch_real_captcha(self.message_tx.clone(), self.new_map_function.clone(), &mut self.captcha_generation, self.real_network.clone());
                     }
                 }
 
@@ -227,24 +242,28 @@ impl View for LoginPage {
                     );
                     if ui.add_enabled(enabled, egui::Button::new("Submit")).clicked() {
                         self.login_state = Some(LoginState::RequestSent);
-                        let map_function = |e| match e {
-                            NetworkEvent::LoginSucceeded(generation, address, jwt) => {
-                                AppMessage::Login(LoginMessage::LoginSuccess(
-                                    generation, address, jwt,
-                                ))
-                            }
-                            NetworkEvent::LoginFailed(generation) => {
-                                AppMessage::Login(LoginMessage::LoginFailed(generation))
-                            }
-                            _ => AppMessage::PlaceHolder,
-                        };
-                        self.login_generation = self
-                            .network
-                            .upgrade()
-                            .unwrap()
-                            .borrow_mut()
-                            .login(self.username.clone(), self.password.clone(), self.captcha.clone(), 1000, Box::new(map_function))
-                            .ok();
+                        login(self.message_tx.clone(), self.new_map_function.clone(),
+                              self.username.clone(), self.password.clone(), self.captcha_id.unwrap().clone(), self.captcha.clone(),
+                              &mut self.login_generation, self.real_network.clone());
+
+                        // let map_function = |e| match e {
+                        //     NetworkEvent::LoginSucceeded(generation, address, jwt) => {
+                        //         AppMessage::Login(LoginMessage::LoginSuccess(
+                        //             generation, address, jwt,
+                        //         ))
+                        //     }
+                        //     NetworkEvent::LoginFailed(generation) => {
+                        //         AppMessage::Login(LoginMessage::LoginFailed(generation))
+                        //     }
+                        //     _ => AppMessage::PlaceHolder,
+                        // };
+                        // self.login_generation = self
+                        //     .network
+                        //     .upgrade()
+                        //     .unwrap()
+                        //     .borrow_mut()
+                        //     .login(self.username.clone(), self.password.clone(), self.captcha.clone(), 1000, Box::new(map_function))
+                        //     .ok();
                     }
 
                     if let Some(ref state) = self.login_state {
@@ -273,7 +292,7 @@ impl View for LoginPage {
 fn fetch_captcha(captcha_generation: &mut Option<u64>, network: Weak<RefCell<dyn Network>>) {
     let map_function = |e: NetworkEvent| match e {
         NetworkEvent::CaptchaFetched(generation, captcha) => {
-            AppMessage::Login(LoginMessage::CaptchaFetched(generation, captcha))
+            AppMessage::Login(LoginMessage::CaptchaFetched(generation, Uuid::nil(), captcha))
         }
         NetworkEvent::CaptchaFailed(generation) => {
             AppMessage::Login(LoginMessage::CaptchaFailed(generation))
@@ -288,6 +307,36 @@ fn fetch_captcha(captcha_generation: &mut Option<u64>, network: Weak<RefCell<dyn
         .ok();
 }
 
+fn fetch_real_captcha(
+    message_tx: Sender<AppMessage>,
+    map_function: Arc<Box<dyn Fn(LoginMessage) -> AppMessage + Send + Sync>>,
+    captcha_generation: &mut Option<u64>,
+    network: Rc<RefCell<dyn NetworkInterface>>,
+) {
+    let message_tx_clone = message_tx.clone();
+    let map_function_clone = map_function.clone();
+    let map = move |event: WithGeneration<CaptchaEvent>| {
+        let generation = event.generation;
+        let message = match event.result.result {
+            Ok(data) => LoginMessage::CaptchaFetched(generation, data.id, data.image_base64),
+            Err(_) => LoginMessage::CaptchaFailed(generation),
+        };
+        let _ = message_tx_clone.send(map_function_clone(message));
+    };
+
+    let map_err = move |error: WithGeneration<NetworkError>| {
+        let generation = error.generation;
+        let message = LoginMessage::CaptchaFailed(generation);
+        let _ = message_tx.send(map_function(message));
+    };
+
+    *captcha_generation = network.borrow_mut().fetch_captcha(
+        1000,
+        Box::new(map),
+        Box::new(map_err),
+    ).ok();
+}
+
 fn load_base64_texture(ctx: &egui::Context, encoded: &str, name: &str) -> Option<TextureHandle> {
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(encoded)
@@ -298,4 +347,42 @@ fn load_base64_texture(ctx: &egui::Context, encoded: &str, name: &str) -> Option
     let pixels = rgba.as_flat_samples();
     let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
     Some(ctx.load_texture(name, color_image, TextureOptions::default()))
+}
+
+fn login(
+    message_tx: Sender<AppMessage>,
+    map_function: Arc<Box<dyn Fn(LoginMessage) -> AppMessage + Send + Sync>>,
+    username: String,
+    password: String,
+    captcha_id: Uuid,
+    captcha_answer: String,
+    login_generation: &mut Option<u64>,
+    network: Rc<RefCell<dyn NetworkInterface>>,
+) {
+    let message_tx_clone = message_tx.clone();
+    let map_function_clone = map_function.clone();
+    let map = move |event: WithGeneration<LoginEvent>| {
+        let generation = event.generation;
+        let message = match event.result.result {
+            Ok(token) => LoginMessage::LoginSuccess(generation, "".to_string(), token.access_token),
+            Err(_) => LoginMessage::LoginFailed(generation),
+        };
+        let _ = message_tx_clone.send(map_function_clone(message));
+    };
+
+    let map_err = move |error: WithGeneration<NetworkError>| {
+        let generation = error.generation;
+        let message = LoginMessage::LoginFailed(generation);
+        let _ = message_tx.send(map_function(message));
+    };
+
+    *login_generation = network.borrow_mut().login(
+        username,
+        password,
+        captcha_id,
+        captcha_answer,
+        1000,
+        Box::new(map),
+        Box::new(map_err),
+    ).ok()
 }

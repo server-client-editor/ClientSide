@@ -29,4 +29,4 @@ tokio-util = { version = "0.7.15" }
 tracing = { version = "0.1.41" }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 url = { version = "2.5.4" }
-uuid = { version = "1.17.0", features = ["v4", "serde"] }
+uuid = { version = "1.17.0", features = ["v4", "v5", "serde"] }
